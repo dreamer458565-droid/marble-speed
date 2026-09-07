@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>구슬 속도 측정기</title>
+<meta name="description" content="경사면을 굴러 내려오는 구슬의 속도와 가속도를 슬로모 영상으로 측정합니다.">
+<meta name="theme-color" content="#111c30">
+<link rel="icon" href="icon.svg">
+<link rel="apple-touch-icon" href="icon.svg">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header>
+  <img src="icon.svg" alt="" class="logo">
+  <div>
+    <h1>구슬 속도 측정기</h1>
+    <p class="sub">경사면을 굴러 내려오는 구슬의 속도와 가속도를 잽니다</p>
+  </div>
+</header>
+
+<main>
+
+<!-- 1. 영상 고르기 -->
+<section id="step-pick" class="card">
+  <h2>슬로모 영상 고르기</h2>
+  <p class="muted">기본 카메라 앱의 <b>슬로모</b> 모드로 찍은 영상을 골라 주세요. 영상은 이 기기 밖으로 나가지 않습니다 — 전부 브라우저 안에서 계산합니다.</p>
+
+  <label class="field">
+    <span>몇 fps 로 찍었나요?</span>
+    <select id="capture-fps">
+      <option value="240" selected>240 fps (슬로모 · 권장)</option>
+      <option value="120">120 fps (슬로모)</option>
+      <option value="60">60 fps</option>
+      <option value="30">30 fps (일반 영상)</option>
+    </select>
+  </label>
+  <p class="hint">아이폰: 설정 → 카메라 → 슬로모 비디오 녹화 에서 확인할 수 있습니다.</p>
+
+  <input type="file" id="file" accept="video/*" hidden>
+  <button id="pick" class="primary big">영상 선택</button>
+
+  <details class="guide">
+    <summary>잘 찍는 요령 (처음이면 꼭 읽어보세요)</summary>
+    <ul>
+      <li><b>폰을 고정하세요.</b> 삼각대가 없으면 책 사이에 끼우거나 컵에 기대 놓으세요. 촬영 중 폰이 움직이면 구슬을 찾지 못합니다.</li>
+      <li><b>경사면 옆에서, 진행 방향과 직각으로</b> 찍으세요. 비스듬히 찍으면 거리가 실제보다 짧게 보입니다.</li>
+      <li><b>자를 같이 찍으세요.</b> 구슬이 지나갈 바로 그 자리에 놓아야 합니다. 이게 없으면 cm 환산이 안 됩니다.</li>
+      <li><b>배경과 구슬을 대비시키세요.</b> 흰 종이 위 검은 구슬처럼요.</li>
+      <li><b>밝은 곳에서</b> 찍으세요. 240fps 는 한 장에 4밀리초뿐이라 어두우면 구슬이 번집니다.</li>
+      <li><b>녹화를 켜고 바로 굴리세요.</b> 오래 멈춰 있으면 구슬이 배경에 묻혀 버립니다.</li>
+    </ul>
+  </details>
+</section>
+
+<!-- 2. 진행 -->
+<section id="step-busy" class="card hidden">
+  <h2 id="busy-title">준비 중</h2>
+  <p class="muted" id="busy-detail"></p>
+  <div class="bar"><div id="busy-fill"></div></div>
+  <p class="pct"><span id="busy-pct">0</span>%</p>
+  <p class="hint" style="text-align:center">분석하는 동안 이 화면을 켜 둔 채로 두세요. 다른 앱으로 넘어가면 영상 재생이 멈춥니다.</p>
+</section>
+
+<!-- 3. 기준선 -->
+<section id="step-cal" class="card hidden">
+  <h2>기준선 긋기</h2>
+  <p class="muted">자 위로 <b class="tag-a">A</b>·<b class="tag-b">B</b> 점을 옮기고 두 점 사이의 실제 길이를 입력하세요. 구슬은 지워진 배경이 보입니다.</p>
+
+  <div id="cal-wrap" class="stage">
+    <canvas id="cal-canvas"></canvas>
+    <div id="handle-a" class="handle a"><i></i><em>A</em></div>
+    <div id="handle-b" class="handle b"><i></i><em>B</em></div>
+  </div>
+
+  <label class="field">
+    <span>A–B 실제 길이</span>
+    <span class="io"><input type="number" id="ref-cm" value="30" min="1" step="0.5" inputmode="decimal"> cm</span>
+  </label>
+  <label class="field">
+    <span>구슬 지름</span>
+    <span class="io"><input type="number" id="dia-mm" value="16" min="3" max="120" step="1" inputmode="numeric"> mm</span>
+  </label>
+  <p class="hint" id="cal-readout"></p>
+
+  <label class="field">
+    <span>굴린 물체</span>
+    <select id="body">
+      <option value="solidSphere" selected>구슬 (속이 찬 구)</option>
+      <option value="hollowSphere">탁구공 (속이 빈 구)</option>
+      <option value="solidCylinder">원판·동전</option>
+    </select>
+  </label>
+
+  <label class="field col">
+    <span>검출 민감도 <b id="sens-label">보통</b></span>
+    <input type="range" id="sens" min="8" max="80" value="24" step="1">
+    <span class="hint">구슬을 못 찾으면 왼쪽(예민)으로, 엉뚱한 게 잡히면 오른쪽(둔감)으로 옮기세요.</span>
+  </label>
+
+  <div class="row">
+    <button id="cal-back">다른 영상</button>
+    <button id="cal-go" class="primary">분석 시작</button>
+  </div>
+</section>
+
+<!-- 4. 결과 -->
+<section id="step-result" class="hidden"></section>
+
+<!-- 오류 -->
+<section id="step-error" class="card hidden">
+  <h2>분석하지 못했습니다</h2>
+  <p id="error-msg" class="muted"></p>
+  <div class="row">
+    <button id="err-back">설정 바꿔 다시</button>
+    <button id="err-restart" class="primary">처음부터</button>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <p>영상은 서버로 전송되지 않습니다. 모든 계산은 브라우저 안에서 이뤄집니다.</p>
+</footer>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>
