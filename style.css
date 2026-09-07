@@ -78,7 +78,8 @@ input[type=range]{width:100%;margin:10px 0 2px;accent-color:var(--accent)}
 /* 기준선 화면 */
 .stage{position:relative;touch-action:none;margin:12px 0;line-height:0;
   border-radius:10px;overflow:hidden;background:#000}
-.stage canvas{width:100%;height:auto;display:block}
+.stage canvas,.stage video{width:100%;height:auto;display:block}
+#live-stage{min-height:120px}
 .handle{position:absolute;width:46px;height:46px;margin:-23px 0 0 -23px;
   display:grid;place-items:center;cursor:grab;touch-action:none}
 .handle i{width:20px;height:20px;border-radius:50%;border:2.5px solid var(--warm);

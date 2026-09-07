@@ -1,7 +1,8 @@
 import { BlobDetector, medianBackground, fitTrajectory, compareWithTheory,
          energySplit, BODIES } from './analysis.js';
 import { openVideo, analysisSize, sampleFrames, streamFrames,
-         probeContainerFps, safePlaybackRate, timeScale } from './video.js';
+         probeContainerFps, safePlaybackRate, timeScale,
+         openCamera, closeCamera, streamCameraFrames } from './video.js';
 import { readVideoTrackInfo } from './mp4.js';
 
 const $ = (id) => document.getElementById(id);
@@ -10,12 +11,13 @@ const BACKGROUND_SAMPLES = 9;
 const S = {
   vid: null, size: null, background: null,
   containerFps: null, captureFps: 240,
+  isLive: false, cam: null, live: null,
   a: { x: 0, y: 0 }, b: { x: 0, y: 0 },
   result: null, comparison: null,
 };
 
 // ── 화면 전환 ────────────────────────────────────────────────
-const SCREENS = ['step-pick', 'step-busy', 'step-cal', 'step-result', 'step-error'];
+const SCREENS = ['step-pick', 'step-live', 'step-busy', 'step-cal', 'step-result', 'step-error'];
 function show(id) {
   SCREENS.forEach(s => $(s).classList.toggle('hidden', s !== id));
   window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -81,6 +83,129 @@ async function loadFile(file) {
   } catch (err) {
     fail(err.message || String(err));
   }
+}
+
+// ── 1-B. 카메라로 바로 재기 ──────────────────────────────────
+//
+// 파일 흐름과 다른 점은 둘뿐이다.
+//   (1) 배경을 '굴리기 전'에 찍는다 — 구슬이 아예 없는 깨끗한 배경이라 파일보다 낫다
+//   (2) 시간이 이미 실제 시간이라 배율 보정이 필요 없다
+// 그 뒤 기준선·분석·결과는 파일 흐름과 똑같은 코드를 탄다.
+
+$('live').onclick = async () => {
+  try {
+    S.isLive = true;
+    $('live-status').textContent = '카메라를 켜는 중…';
+    $('live-go').disabled = true;
+    $('live-go').textContent = '배경 잡기';
+    show('step-live');
+
+    S.cam = await openCamera();
+    $('live-stage').replaceChildren(S.cam.el);
+    S.size = analysisSize(S.cam.width, S.cam.height, 640);
+
+    const fps = S.cam.frameRate;
+    S.captureFps = fps || 30;
+    S.containerFps = fps || null;
+    $('live-status').textContent =
+      `${S.cam.width}×${S.cam.height}` + (fps ? ` · ${Math.round(fps)}fps` : '') +
+      ' — 구슬을 치운 상태에서 [배경 잡기]를 누르세요.';
+    $('live-go').disabled = false;
+    $('live-go').onclick = captureBackgroundThenTrack;
+  } catch (err) {
+    S.isLive = false;
+    closeCamera(S.cam); S.cam = null;
+    fail(err.message || String(err));
+  }
+};
+
+$('live-cancel').onclick = () => {
+  stopLive();
+  show('step-pick');
+};
+
+function stopLive() {
+  try { S.live?.stop(); } catch (_) {}
+  S.live = null;
+  closeCamera(S.cam);
+  S.cam = null;
+}
+
+async function captureBackgroundThenTrack() {
+  $('live-go').disabled = true;
+  $('live-status').textContent = '배경을 잡고 있습니다 — 그대로 두세요…';
+
+  // 살짝 떨어진 프레임 9장의 중앙값. 조명 깜빡임이나 잡음이 상쇄된다.
+  const need = BACKGROUND_SAMPLES;
+  const frames = [];
+  let seen = 0;
+  const grab = streamCameraFrames(S.cam, S.size, (luma) => {
+    if (seen++ % 4 === 0 && frames.length < need) frames.push(new Uint8Array(luma));
+    if (frames.length >= need) grab.stop();
+  });
+  await Promise.race([grab.done, new Promise(r => setTimeout(r, 6000))]);
+  grab.stop();
+
+  if (frames.length < 3) {
+    stopLive();
+    fail('카메라에서 화면을 충분히 읽지 못했습니다. 다시 시도하거나 영상 파일로 해 보세요.');
+    return;
+  }
+  if (frames.length % 2 === 0) frames.pop();
+  S.background = medianBackground(frames, S.size.width, S.size.height);
+
+  // 이제 추적 시작
+  const points = [];
+  let last = null, vx = 0, vy = 0, miss = 0;
+  const { width: W, height: H } = S.size;
+  const detector = new BlobDetector(W, H);
+  const threshold = +$('sens').value;
+
+  // 아직 기준선을 안 그었으므로 구슬 크기를 모른다. 크기 조건 없이 찾는다.
+  const track = streamCameraFrames(S.cam, S.size, (luma, t) => {
+    const roi = (last && miss < 3)
+      ? { x0: Math.round(last.x + vx) - 60 - Math.abs(vx), y0: Math.round(last.y + vy) - 60 - Math.abs(vy),
+          x1: Math.round(last.x + vx) + 60 + Math.abs(vx), y1: Math.round(last.y + vy) + 60 + Math.abs(vy) }
+      : { x0: 0, y0: 0, x1: W - 1, y1: H - 1 };
+
+    // 카메라는 프레임레이트가 낮아 구슬이 길게 번진다 → 번짐 허용
+    const blob = detector.detect(luma, S.background, threshold, roi, null, true);
+    if (blob) {
+      const p = { x: blob.cx, y: blob.cy };
+      if (last && Math.hypot(p.x - last.x, p.y - last.y) < 0.1) { last = p; return; }
+      if (last && miss === 0) {
+        vx = 0.6 * vx + 0.4 * (p.x - last.x);
+        vy = 0.6 * vy + 0.4 * (p.y - last.y);
+      } else { vx = 0; vy = 0; }
+      last = p; miss = 0;
+      points.push({ time: t, point: p, area: blob.area });
+      $('live-status').textContent = `구슬 ${points.length}장 잡았습니다 — 다 굴렀으면 [정지]`;
+    } else {
+      miss++;
+      if (miss >= 3) { last = null; vx = 0; vy = 0; }
+    }
+  });
+  S.live = track;
+
+  $('live-status').textContent = '이제 구슬을 굴리세요!';
+  $('live-go').textContent = '정지';
+  $('live-go').disabled = false;
+  $('live-go').onclick = async () => {
+    $('live-go').disabled = true;
+    track.stop();
+    const info = await track.done;
+    stopLive();
+
+    if (points.length < 6) {
+      fail(`구슬을 ${points.length}장밖에 못 찾았습니다. 배경과 구슬의 밝기 차이를 키우거나, 더 밝은 곳에서 해 보세요.`);
+      return;
+    }
+    // 카메라 시간은 이미 실제 시간이다 (배율 보정 없음)
+    S.livePoints = points;
+    S.liveClock = info.clock;
+    setupCalibration();
+    show('step-cal');
+  };
 }
 
 // ── 2. 기준선 ───────────────────────────────────────────────
@@ -197,8 +322,8 @@ $('sens').oninput = () => {
   const v = +$('sens').value;
   $('sens-label').textContent = v <= 16 ? '예민' : v >= 40 ? '둔감' : '보통';
 };
-$('cal-back').onclick = () => show('step-pick');
-$('err-restart').onclick = () => show('step-pick');
+$('cal-back').onclick = () => { S.isLive = false; stopLive(); show('step-pick'); };
+$('err-restart').onclick = () => { S.isLive = false; stopLive(); show('step-pick'); };
 $('err-back').onclick = () => show(S.background ? 'step-cal' : 'step-pick');
 
 // ── 3. 분석 ─────────────────────────────────────────────────
@@ -206,6 +331,16 @@ $('cal-go').onclick = async () => {
   try {
     const ppm = pixelsPerMeter();
     if (!ppm) return;
+
+    // 카메라 모드는 이미 굴리는 동안 추적을 마쳤다. 바로 적합만 하면 된다.
+    if (S.isLive) {
+      S.result = fitTrajectory(S.livePoints, ppm);
+      S.comparison = compareWithTheory(
+        S.result.trajectoryAngleDegrees, $('body').value, S.result.acceleration);
+      renderResult();
+      show('step-result');
+      return;
+    }
 
     const rate = safePlaybackRate(S.containerFps || S.captureFps);
     busy('구슬 추적 중',
@@ -348,8 +483,10 @@ function renderResult() {
     <div class="card">
       <h2>이 값을 얼마나 믿을 수 있나</h2>
       ${check(S.captureFps >= 120,
-        `슬로모로 찍었습니다 (${S.captureFps}fps)`,
-        `${S.captureFps}fps 는 너무 느립니다. 슬로모로 다시 찍으면 훨씬 정확해집니다.`)}
+        `슬로모로 찍었습니다 (${Math.round(S.captureFps)}fps)`,
+        S.isLive
+          ? `카메라로 바로 잰 값입니다 (${Math.round(S.captureFps)}fps). 브라우저가 열어 주는 최대치라 어쩔 수 없지만, 슬로모(240fps)로 찍어 파일로 넣으면 오차가 10배쯤 줄어듭니다.`
+          : `${Math.round(S.captureFps)}fps 는 너무 느립니다. 슬로모로 다시 찍으면 훨씬 정확해집니다.`)}
       ${check(r.inlierCount >= 20,
         `${r.inlierCount}장의 프레임으로 계산했습니다`,
         `${r.inlierCount}장뿐이라 값이 흔들릴 수 있습니다. 구슬과 배경 대비를 높여 보세요.`)}

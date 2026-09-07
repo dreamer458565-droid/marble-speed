@@ -39,7 +39,9 @@
   <p class="hint">아이폰: 설정 → 카메라 → 슬로모 비디오 녹화 에서 확인할 수 있습니다.</p>
 
   <input type="file" id="file" accept="video/*" hidden>
-  <button id="pick" class="primary big">영상 선택</button>
+  <button id="pick" class="primary big">슬로모 영상 선택</button>
+  <button id="live" class="big" style="margin-top:8px">카메라로 바로 재기</button>
+  <p class="hint">카메라로 바로 재면 파일을 고를 필요가 없습니다. 다만 브라우저는 240fps 를 못 열어 주므로(최대 60fps) 정확도는 슬로모 쪽이 훨씬 높습니다.</p>
 
   <details class="guide">
     <summary>잘 찍는 요령 (처음이면 꼭 읽어보세요)</summary>
@@ -61,6 +63,20 @@
   <div class="bar"><div id="busy-fill"></div></div>
   <p class="pct"><span id="busy-pct">0</span>%</p>
   <p class="hint" style="text-align:center">분석하는 동안 이 화면을 켜 둔 채로 두세요. 다른 앱으로 넘어가면 영상 재생이 멈춥니다.</p>
+</section>
+
+<!-- 2-B. 카메라로 바로 재기 -->
+<section id="step-live" class="card hidden">
+  <h2>카메라로 바로 재기</h2>
+  <p class="muted">폰을 고정하고 경사면 옆에서 진행 방향과 <b>직각</b>으로 잡으세요. <b>자를 구슬이 지나갈 자리에 같이</b> 놓아야 합니다.</p>
+
+  <div id="live-stage" class="stage"></div>
+  <p class="hint" id="live-status">카메라를 켜는 중…</p>
+
+  <div class="row">
+    <button id="live-cancel">그만두기</button>
+    <button id="live-go" class="primary" disabled>배경 잡기</button>
+  </div>
 </section>
 
 <!-- 3. 기준선 -->

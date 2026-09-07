@@ -276,3 +276,127 @@ export function timeScale(containerFps, captureFps) {
   // 원본 그대로면 240/240 = 1 → 손대지 않는다.
   return Math.min(1, containerFps / captureFps);
 }
+
+// ── 카메라로 바로 재기 ──────────────────────────────────────
+//
+// 브라우저는 240fps 를 열어 주지 않는다 (iOS 사파리는 최대 60fps).
+// 그래서 슬로모 파일보다 정확도가 낮다. 대신 파일을 주고받을 필요가 없다.
+//
+// 시간은 파일과 달리 '지금 몇 시'로 재야 한다.
+// requestVideoFrameCallback 이 주는 captureTime(카메라가 실제로 찍은 시각)이 가장 정확하고,
+// 없으면 mediaTime, 그것도 없으면 콜백이 불린 시각을 쓴다.
+// 단위가 섞이면 통째로 틀리므로 첫 프레임에서 한 가지를 골라 끝까지 그것만 쓴다.
+
+export async function openCamera() {
+  if (!navigator.mediaDevices?.getUserMedia) {
+    throw new Error('이 브라우저에서는 카메라를 쓸 수 없습니다. 영상 파일을 골라 주세요.');
+  }
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: {
+        facingMode: { ideal: 'environment' },   // 뒷면 카메라
+        width: { ideal: 1920 },
+        height: { ideal: 1080 },
+        frameRate: { ideal: 60, min: 30 },
+      },
+    });
+  } catch (e) {
+    if (e && (e.name === 'NotAllowedError' || e.name === 'SecurityError')) {
+      throw new Error('카메라 사용을 허용해 주세요. 주소창의 자물쇠를 눌러 권한을 켤 수 있습니다.');
+    }
+    throw new Error('카메라를 열지 못했습니다: ' + (e?.message || e));
+  }
+  return attachStream(stream);
+}
+
+/** MediaStream 을 화면에 붙여 프레임을 꺼낼 수 있게 만든다 */
+export async function attachStream(stream) {
+  document.querySelectorAll('video[data-marble-cam]').forEach(v => v.remove());
+
+  const video = document.createElement('video');
+  video.playsInline = true;
+  video.muted = true;
+  video.autoplay = true;
+  video.dataset.marbleCam = '1';
+  video.srcObject = stream;
+  video.style.cssText = 'width:100%;height:auto;display:block';
+
+  await new Promise((resolve, reject) => {
+    video.onloadedmetadata = resolve;
+    video.onerror = () => reject(new Error('카메라 화면을 읽지 못했습니다.'));
+    setTimeout(resolve, 4000);
+  });
+  await video.play().catch(() => {});
+
+  const track = stream.getVideoTracks()[0];
+  const settings = track?.getSettings?.() || {};
+  return {
+    el: video,
+    stream,
+    width: video.videoWidth || settings.width || 1280,
+    height: video.videoHeight || settings.height || 720,
+    frameRate: settings.frameRate || null,
+  };
+}
+
+export function closeCamera(cam) {
+  try { cam?.stream?.getTracks()?.forEach(t => t.stop()); } catch (_) {}
+  try { cam?.el?.remove(); } catch (_) {}
+}
+
+/** 첫 프레임에서 쓸 시각 출처를 정한다. 단위가 섞이면 안 되므로 하나만 골라 고정한다. */
+function chooseClock(meta) {
+  if (typeof meta.captureTime === 'number' && meta.captureTime > 0) {
+    return { pick: (m) => m.captureTime / 1000, name: 'captureTime' };
+  }
+  if (typeof meta.mediaTime === 'number' && meta.mediaTime > 0) {
+    return { pick: (m) => m.mediaTime, name: 'mediaTime' };
+  }
+  return { pick: (_m, now) => now / 1000, name: 'now' };
+}
+
+/**
+ * 카메라 화면에서 프레임을 계속 꺼낸다. stop() 을 부를 때까지 이어진다.
+ * @returns {{stop:()=>void, done:Promise<{frames:number, clock:string}>}}
+ */
+export function streamCameraFrames(cam, size, onFrame) {
+  const video = cam.el;
+  const { ctx } = makeCanvas(size.width, size.height);
+  const luma = new Uint8Array(size.width * size.height);
+
+  let stopped = false;
+  let frames = 0;
+  let clock = null;
+  let resolveDone;
+  const done = new Promise((r) => { resolveDone = r; });
+
+  if (!('requestVideoFrameCallback' in video)) {
+    stopped = true;
+    resolveDone({ frames: 0, clock: 'none' });
+    return { stop: () => {}, done };
+  }
+
+  const tick = (now, meta) => {
+    if (stopped) return;
+    if (!clock) clock = chooseClock(meta);
+    try {
+      ctx.drawImage(video, 0, 0, size.width, size.height);
+      const img = ctx.getImageData(0, 0, size.width, size.height);
+      onFrame(toLuma(img, luma), clock.pick(meta, now));
+      frames++;
+    } catch (_) { /* 한 장 실패는 넘어간다 */ }
+    video.requestVideoFrameCallback(tick);
+  };
+  video.requestVideoFrameCallback(tick);
+
+  return {
+    stop: () => {
+      if (stopped) return;
+      stopped = true;
+      resolveDone({ frames, clock: clock?.name || 'none' });
+    },
+    done,
+  };
+}

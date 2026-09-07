@@ -56,8 +56,13 @@ export class BlobDetector {
     this.stack = new Int32Array(Math.min(n, 1 << 16));
   }
 
-  /** @returns {{area,minX,maxX,minY,maxY,cx,cy}|null} */
-  detect(frame, background, threshold, roi, expectedArea) {
+  /**
+   * @param allowBlur 카메라로 바로 잴 때처럼 프레임레이트가 낮으면 구슬이 길게 번진다.
+   *                  이때 '동그란가' 조건을 풀어 준다. 번져도 중심은 노출 구간의
+   *                  평균 위치라 추적에는 문제가 없다.
+   * @returns {{area,minX,maxX,minY,maxY,cx,cy}|null}
+   */
+  detect(frame, background, threshold, roi, expectedArea, allowBlur = false) {
     const { width: W, height: H, diff, stamp } = this;
     const x0 = Math.max(0, roi.x0), y0 = Math.max(0, roi.y0);
     const x1 = Math.min(W - 1, roi.x1), y1 = Math.min(H - 1, roi.y1);
@@ -113,7 +118,7 @@ export class BlobDetector {
           cx: wx / wsum + 0.5,
           cy: wy / wsum + 0.5,
         };
-        const score = scoreBlob(blob, expectedArea);
+        const score = scoreBlob(blob, expectedArea, allowBlur);
         if (score > bestScore) { bestScore = score; best = blob; }
       }
     }
@@ -121,16 +126,28 @@ export class BlobDetector {
   }
 }
 
-function scoreBlob(b, expectedArea) {
+function scoreBlob(b, expectedArea, allowBlur = false) {
   const bw = b.maxX - b.minX + 1, bh = b.maxY - b.minY + 1;
   const aspect = Math.min(bw, bh) / Math.max(bw, bh);
   const fill = b.area / (bw * bh);
-  if (aspect <= 0.35 || fill <= 0.35) return 0;
-  const shape = aspect * fill;
+
+  // 번짐을 허용할 때는 길쭉해도 받아 준다. 대신 채움 정도는 여전히 본다
+  // (길쭉하면서 속이 빈 것은 구슬이 아니라 그림자·테두리일 가능성이 높다).
+  const minAspect = allowBlur ? 0.12 : 0.35;
+  const minFill = allowBlur ? 0.30 : 0.35;
+  if (aspect <= minAspect || fill <= minFill) return 0;
+
+  // 번진 구슬은 넓이가 늘어나므로 형태 점수를 넓이로만 깎지 않는다
+  const shape = allowBlur ? Math.max(0.35, fill) : aspect * fill;
   if (!expectedArea || expectedArea <= 0) return shape * Math.min(1, b.area / 200);
+
   const ratio = b.area / expectedArea;
-  if (ratio <= 0.15 || ratio >= 8) return 0;
-  return shape * Math.exp(-Math.abs(Math.log(ratio)));
+  // 번짐이 있으면 예상보다 몇 배 커질 수 있다
+  const hi = allowBlur ? 25 : 8;
+  if (ratio <= 0.15 || ratio >= hi) return 0;
+  // 커지는 쪽은 관대하게, 작아지는 쪽은 그대로 엄격하게
+  const dev = ratio > 1 && allowBlur ? Math.log(ratio) / 2.5 : Math.log(ratio);
+  return shape * Math.exp(-Math.abs(dev));
 }
 
 // ── 궤적 적합 ────────────────────────────────────────────────

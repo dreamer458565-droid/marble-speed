@@ -1,4 +1,4 @@
-import { fitTrajectory, theoreticalAcceleration } from '../public/analysis.js';
+import { fitTrajectory, theoreticalAcceleration } from '../analysis.js';
 
 // Swift 판과 같은 선형합동 난수 — 입력 데이터를 완전히 동일하게 만든다
 const MASK = (1n << 64n) - 1n;
