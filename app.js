@@ -101,7 +101,9 @@ $('live').onclick = async () => {
     show('step-live');
 
     S.cam = await openCamera();
-    $('live-stage').replaceChildren(S.cam.el);
+    const stage = $('live-stage');
+    stage.style.aspectRatio = `${S.cam.width} / ${S.cam.height}`;
+    stage.replaceChildren(S.cam.el, $('live-overlay'));
     S.size = analysisSize(S.cam.width, S.cam.height, 640);
 
     const fps = S.cam.frameRate;
@@ -109,7 +111,7 @@ $('live').onclick = async () => {
     S.containerFps = fps || null;
     $('live-status').textContent =
       `${S.cam.width}×${S.cam.height}` + (fps ? ` · ${Math.round(fps)}fps` : '') + ' — 화면을 익히는 중…';
-    startAutoWatch();
+    startWatch();
   } catch (err) {
     S.isLive = false;
     closeCamera(S.cam); S.cam = null;
@@ -130,43 +132,68 @@ function stopLive() {
 }
 
 /**
- * 자동 감지.
+ * 카메라 감시 루프.
  *
- * 버튼을 누를 필요가 없다. 배경을 계속 갱신하면서 지켜보다가,
- * 움직이는 것이 나타나면 그때부터 기록하고 지나가면 알아서 끝낸다.
+ * 화면을 익힌 뒤(배경 학습) [측정 시작]을 누르면 그때부터 기록한다.
+ * 기록 중에는 잡힌 자리를 화면에 그려 준다 — 구슬이 제대로 보이는지
+ * 눈으로 확인할 수 있어야 하기 때문이다.
+ * 구슬이 다 지나가면 알아서 끝나고, [정지]로 직접 끝낼 수도 있다.
  *
- * 배경을 '지수 이동 평균'으로 계속 갱신하는 이유:
- *  - 조명이 바뀌거나 폰이 살짝 흔들려도 따라간다
- *  - 갱신을 아주 천천히 하므로(프레임당 3%) 빠르게 지나가는 구슬은 배경에 배지 않는다
+ * 배경은 지수 이동 평균으로 계속 갱신한다. 조명이 바뀌거나 폰이 살짝 흔들려도
+ * 따라가고, 갱신이 느려서(프레임당 3%) 빠르게 지나가는 구슬은 배경에 배지 않는다.
  */
-function startAutoWatch() {
+function startWatch() {
   const { width: W, height: H } = S.size;
   const n = W * H;
-  const bgF = new Float32Array(n);      // 실수로 들고 있어야 조금씩 갱신된다
+  const bgF = new Float32Array(n);
   const bgU = new Uint8Array(n);
   const detector = new BlobDetector(W, H);
-  const threshold = +$('sens').value;
-  const maxArea = Math.round(n * 0.01); // 화면의 1% 넘게 큰 것은 구슬이 아니다 (손·그림자)
+  const maxArea = Math.round(n * 0.01);   // 화면의 1% 넘으면 손·그림자로 본다
 
-  const WARMUP = 25;        // 배경을 익히는 프레임 수
-  const MIN_POINTS = 8;     // 이만큼 모여야 '한 번 굴린 것'으로 인정
-  const LOST_END = 12;      // 이만큼 안 보이면 다 지나갔다고 본다
+  const ov = $('live-overlay');
+  ov.width = W; ov.height = H;
+  const octx = ov.getContext('2d');
 
-  let seen = 0;
+  const WARMUP = 25, MIN_POINTS = 8, LOST_END = 12;
+  let seen = 0, phase = 'warming';
   let points = [];
   let last = null, vx = 0, vy = 0, lost = 0;
 
   const setStatus = (t) => { $('live-status').textContent = t; };
 
+  const paint = (blob) => {
+    octx.clearRect(0, 0, W, H);
+    if (points.length > 1) {
+      octx.strokeStyle = 'rgba(74,208,127,.55)';
+      octx.lineWidth = 2;
+      octx.beginPath();
+      points.forEach((p, i) => i ? octx.lineTo(p.point.x, p.point.y) : octx.moveTo(p.point.x, p.point.y));
+      octx.stroke();
+    }
+    octx.fillStyle = '#4ad07f';
+    for (const p of points) {
+      octx.beginPath(); octx.arc(p.point.x, p.point.y, 2.4, 0, 7); octx.fill();
+    }
+    if (blob) {
+      const r = Math.max(7, (blob.maxX - blob.minX + blob.maxY - blob.minY) / 3);
+      octx.strokeStyle = phase === 'armed' ? '#4ad07f' : '#37c7e0';
+      octx.lineWidth = 2.5;
+      octx.beginPath(); octx.arc(blob.cx, blob.cy, r, 0, 7); octx.stroke();
+      octx.beginPath();
+      octx.moveTo(blob.cx - r - 5, blob.cy); octx.lineTo(blob.cx - r + 2, blob.cy);
+      octx.moveTo(blob.cx + r - 2, blob.cy); octx.lineTo(blob.cx + r + 5, blob.cy);
+      octx.moveTo(blob.cx, blob.cy - r - 5); octx.lineTo(blob.cx, blob.cy - r + 2);
+      octx.moveTo(blob.cx, blob.cy + r - 2); octx.lineTo(blob.cx, blob.cy + r + 5);
+      octx.stroke();
+    }
+  };
+
   const track = streamCameraFrames(S.cam, S.size, (luma, t) => {
     seen++;
 
-    // ── 배경 갱신 ──
-    if (seen === 1) {
-      for (let i = 0; i < n; i++) bgF[i] = luma[i];
-    } else {
-      // 구슬을 쫓는 중에는 더 천천히 — 구슬이 배경에 배지 않도록
-      const a = points.length ? 0.005 : 0.03;
+    if (seen === 1) { for (let i = 0; i < n; i++) bgF[i] = luma[i]; }
+    else {
+      const a = phase === 'armed' && points.length ? 0.005 : 0.03;
       for (let i = 0; i < n; i++) bgF[i] += (luma[i] - bgF[i]) * a;
     }
     for (let i = 0; i < n; i++) bgU[i] = bgF[i];
@@ -175,57 +202,72 @@ function startAutoWatch() {
       setStatus(`화면을 익히는 중… ${Math.round((seen / WARMUP) * 100)}%`);
       return;
     }
-    if (seen === WARMUP) setStatus('준비됐습니다 — 구슬을 굴리세요.');
+    if (phase === 'warming') {
+      phase = 'idle';
+      $('live-go').disabled = false;
+      setStatus('구슬을 굴려 보며 ● 표시가 따라붙는지 확인한 뒤 [측정 시작]을 누르세요.');
+    }
 
-    // ── 움직이는 것 찾기 ──
     const roi = (last && lost < 3)
       ? { x0: Math.round(last.x + vx) - 70 - Math.abs(vx), y0: Math.round(last.y + vy) - 70 - Math.abs(vy),
           x1: Math.round(last.x + vx) + 70 + Math.abs(vx), y1: Math.round(last.y + vy) + 70 + Math.abs(vy) }
       : { x0: 0, y0: 0, x1: W - 1, y1: H - 1 };
 
+    const threshold = +$('sens').value;
     const blob = detector.detect(luma, bgU, threshold, roi, null, true, maxArea);
+    paint(blob);
 
     if (blob) {
       const p = { x: blob.cx, y: blob.cy };
-      // 제자리에 있는 것은 구슬이 아니다 (그림자·반사)
       if (last && Math.hypot(p.x - last.x, p.y - last.y) < 0.4) { last = p; lost++; return; }
       if (last && lost === 0) {
         vx = 0.6 * vx + 0.4 * (p.x - last.x);
         vy = 0.6 * vy + 0.4 * (p.y - last.y);
       } else { vx = 0; vy = 0; }
       last = p; lost = 0;
-      points.push({ time: t, point: p, area: blob.area, minorSigma: blob.minorSigma });
-      setStatus(`구슬을 쫓는 중… ${points.length}장`);
+      if (phase === 'armed') {
+        points.push({ time: t, point: p, area: blob.area, minorSigma: blob.minorSigma });
+        setStatus(`쫓는 중… ${points.length}장`);
+      }
       return;
     }
 
-    // ── 놓쳤을 때 ──
     lost++;
     if (lost < LOST_END) return;
     last = null; vx = 0; vy = 0;
 
-    if (points.length >= MIN_POINTS) {
+    // 다 지나갔으면 알아서 끝낸다
+    if (phase === 'armed' && points.length >= MIN_POINTS) {
       const done = points;
-      points = [];
-      S.background = new Uint8Array(bgU);   // 기준선 화면에 쓸 배경
+      S.background = new Uint8Array(bgU);
       track.stop();
       finishAuto(done);
-    } else if (points.length) {
-      points = [];
-      setStatus('너무 짧게 지나갔습니다 — 다시 굴려 보세요.');
     }
   });
 
   S.live = track;
-  $('live-go').textContent = '지금 멈추기';
-  $('live-go').disabled = false;
-  $('live-go').onclick = () => {
+
+  const arm = () => {
+    phase = 'armed';
+    points = [];
+    setStatus('굴리세요! 다 지나가면 알아서 끝납니다.');
+    $('live-go').textContent = '정지';
+    $('live-go').onclick = finish;
+  };
+  const finish = () => {
     const done = points;
     S.background = new Uint8Array(bgU);
     track.stop();
     if (done.length >= 6) finishAuto(done);
-    else { stopLive(); fail(`구슬을 ${done.length}장밖에 못 찾았습니다. 배경과 구슬의 밝기 차이를 키우거나 더 밝은 곳에서 해 보세요.`); }
+    else {
+      stopLive();
+      fail(`구슬을 ${done.length}장밖에 못 찾았습니다. 배경과 구슬의 밝기 차이를 키우거나, 더 밝은 곳에서 해 보세요.`);
+    }
   };
+
+  $('live-go').textContent = '측정 시작';
+  $('live-go').disabled = true;
+  $('live-go').onclick = arm;
 }
 
 function finishAuto(points) {

@@ -68,14 +68,16 @@
 <!-- 2-B. 카메라로 바로 재기 -->
 <section id="step-live" class="card hidden">
   <h2>카메라로 바로 재기</h2>
-  <p class="muted">폰을 고정하고 경사면 옆에서 진행 방향과 <b>직각</b>으로 잡으세요. 잠깐 기다리면 화면을 익힙니다. 그 뒤 <b>그냥 굴리면</b> 알아서 잡고 알아서 끝냅니다.</p>
+  <p class="muted compact">폰을 고정하고 경사면 옆에서 <b>직각</b>으로. 구슬이 <span class="dotc"></span>로 표시되면 잘 보이는 것입니다.</p>
 
-  <div id="live-stage" class="stage"></div>
+  <div id="live-stage" class="stage">
+    <canvas id="live-overlay"></canvas>
+  </div>
   <p class="hint" id="live-status">카메라를 켜는 중…</p>
 
   <div class="row">
     <button id="live-cancel">그만두기</button>
-    <button id="live-go" class="primary" disabled>지금 멈추기</button>
+    <button id="live-go" class="primary" disabled>측정 시작</button>
   </div>
 </section>
 

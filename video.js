@@ -44,9 +44,13 @@ export async function openVideo(file) {
   };
 }
 
-/** 분석용 축소 크기. 구슬이 최소 4~5px 은 되어야 추적된다. */
-export function analysisSize(width, height, targetWidth = 640) {
-  const scale = Math.min(1, targetWidth / width);
+/**
+ * 분석용 축소 크기. 구슬이 최소 4~5px 은 되어야 추적된다.
+ * 가로가 아니라 '긴 변'을 기준으로 줄인다 — 세로로 든 폰의 영상(720x1280)을
+ * 가로폭 기준으로 줄이면 640x1138 이 되어 픽셀이 3배로 늘고 처리가 버거워진다.
+ */
+export function analysisSize(width, height, targetLongSide = 640) {
+  const scale = Math.min(1, targetLongSide / Math.max(width, height));
   return {
     width: Math.max(2, Math.round(width * scale)),
     height: Math.max(2, Math.round(height * scale)),

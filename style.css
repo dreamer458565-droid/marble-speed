@@ -79,7 +79,16 @@ input[type=range]{width:100%;margin:10px 0 2px;accent-color:var(--accent)}
 .stage{position:relative;touch-action:none;margin:12px 0;line-height:0;
   border-radius:10px;overflow:hidden;background:#000}
 .stage canvas,.stage video{width:100%;height:auto;display:block}
-#live-stage{min-height:120px}
+
+/* 카메라 미리보기 — 세로 영상이 화면을 다 잡아먹지 않도록 높이를 묶는다.
+   비율은 실제 영상에 맞춰 JS 가 넣어 준다. */
+#live-stage{position:relative;width:100%;max-height:44vh;margin:12px auto;overflow:hidden}
+#live-stage video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+#live-overlay{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;background:none}
+.compact{font-size:12.5px;margin-bottom:6px}
+.dotc{display:inline-block;width:9px;height:9px;border-radius:50%;
+  background:#37c7e0;box-shadow:0 0 0 2px rgba(55,199,224,.35);vertical-align:middle}
+#step-live .row{position:sticky;bottom:8px}
 .handle{position:absolute;width:46px;height:46px;margin:-23px 0 0 -23px;
   display:grid;place-items:center;cursor:grab;touch-action:none}
 .handle i{width:20px;height:20px;border-radius:50%;border:2.5px solid var(--warm);
