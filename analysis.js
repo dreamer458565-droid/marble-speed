@@ -62,7 +62,7 @@ export class BlobDetector {
    *                  평균 위치라 추적에는 문제가 없다.
    * @returns {{area,minX,maxX,minY,maxY,cx,cy}|null}
    */
-  detect(frame, background, threshold, roi, expectedArea, allowBlur = false) {
+  detect(frame, background, threshold, roi, expectedArea, allowBlur = false, maxArea = 0) {
     const { width: W, height: H, diff, stamp } = this;
     const x0 = Math.max(0, roi.x0), y0 = Math.max(0, roi.y0);
     const x1 = Math.min(W - 1, roi.x1), y1 = Math.min(H - 1, roi.y1);
@@ -94,6 +94,7 @@ export class BlobDetector {
 
         let area = 0, minX = x, maxX = x, minY = y, maxY = y;
         let wsum = 0, wx = 0, wy = 0;
+        let wxx = 0, wxy = 0, wyy = 0;   // 2차 모멘트 — 덩어리의 퍼진 정도
 
         while (sp > 0) {
           const idx = stack[--sp];
@@ -102,6 +103,7 @@ export class BlobDetector {
           const w = diff[idx];
 
           area++; wsum += w; wx += w * px; wy += w * py;
+          wxx += w * px * px; wxy += w * px * py; wyy += w * py * py;
           if (px < minX) minX = px; else if (px > maxX) maxX = px;
           if (py < minY) minY = py; else if (py > maxY) maxY = py;
 
@@ -112,13 +114,17 @@ export class BlobDetector {
         }
 
         if (area < 3 || wsum <= 0) continue;
+        const mx = wx / wsum, my = wy / wsum;
         // 픽셀 (x,y) 가 덮는 영역은 [x, x+1) 이므로 중심은 x+0.5 다
         const blob = {
           area, minX, maxX, minY, maxY,
-          cx: wx / wsum + 0.5,
-          cy: wy / wsum + 0.5,
+          cx: mx + 0.5,
+          cy: my + 0.5,
+          minorSigma: minorSpread(wxx / wsum - mx * mx,
+                                  wxy / wsum - mx * my,
+                                  wyy / wsum - my * my),
         };
-        const score = scoreBlob(blob, expectedArea, allowBlur);
+        const score = scoreBlob(blob, expectedArea, allowBlur, maxArea);
         if (score > bestScore) { bestScore = score; best = blob; }
       }
     }
@@ -126,7 +132,36 @@ export class BlobDetector {
   }
 }
 
-function scoreBlob(b, expectedArea, allowBlur = false) {
+/**
+ * 덩어리가 '짧은 쪽'으로 얼마나 퍼져 있는지 (표준편차, 픽셀).
+ *
+ * 구슬이 빨리 지나가면 진행 방향으로 길게 번지지만, 그와 수직인 방향의 폭은
+ * 번짐과 무관하게 구슬의 실제 지름을 유지한다. 그래서 짧은 쪽을 쓴다.
+ *
+ * 균일한 원판(반지름 r)이면 어느 축으로든 표준편차가 r/2 이므로 지름 = 4σ 다.
+ * 픽셀 격자 자체가 1/12 만큼 분산을 보태므로 그만큼 빼 준다.
+ */
+function minorSpread(mxx, mxy, myy) {
+  const tr = mxx + myy;
+  const diff = Math.sqrt(Math.max(0, (mxx - myy) * (mxx - myy) + 4 * mxy * mxy));
+  const lambdaMin = (tr - diff) / 2;
+  return Math.sqrt(Math.max(0, lambdaMin - 1 / 12));
+}
+
+/** 검출된 구슬들의 짧은 쪽 폭에서 지름(픽셀)을 추정한다. 중앙값이라 튀는 프레임에 강하다. */
+export function estimateMarbleDiameterPx(points) {
+  const sigmas = points
+    .map(p => p.minorSigma)
+    .filter(v => Number.isFinite(v) && v > 0.2)
+    .sort((a, b) => a - b);
+  if (sigmas.length < 3) return null;
+  const median = sigmas[sigmas.length >> 1];
+  return median > 0 ? median * 4 : null;
+}
+
+function scoreBlob(b, expectedArea, allowBlur = false, maxArea = 0) {
+  // 자동 감지에서는 크기를 모르므로, 손·그림자처럼 너무 큰 것은 구슬이 아니라고 본다
+  if (maxArea > 0 && b.area > maxArea) return 0;
   const bw = b.maxX - b.minX + 1, bh = b.maxY - b.minY + 1;
   const aspect = Math.min(bw, bh) / Math.max(bw, bh);
   const fill = b.area / (bw * bh);

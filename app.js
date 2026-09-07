@@ -1,5 +1,5 @@
 import { BlobDetector, medianBackground, fitTrajectory, compareWithTheory,
-         energySplit, BODIES } from './analysis.js';
+         energySplit, estimateMarbleDiameterPx, BODIES } from './analysis.js';
 import { openVideo, analysisSize, sampleFrames, streamFrames,
          probeContainerFps, safePlaybackRate, timeScale,
          openCamera, closeCamera, streamCameraFrames } from './video.js';
@@ -108,10 +108,8 @@ $('live').onclick = async () => {
     S.captureFps = fps || 30;
     S.containerFps = fps || null;
     $('live-status').textContent =
-      `${S.cam.width}×${S.cam.height}` + (fps ? ` · ${Math.round(fps)}fps` : '') +
-      ' — 구슬을 치운 상태에서 [배경 잡기]를 누르세요.';
-    $('live-go').disabled = false;
-    $('live-go').onclick = captureBackgroundThenTrack;
+      `${S.cam.width}×${S.cam.height}` + (fps ? ` · ${Math.round(fps)}fps` : '') + ' — 화면을 익히는 중…';
+    startAutoWatch();
   } catch (err) {
     S.isLive = false;
     closeCamera(S.cam); S.cam = null;
@@ -131,81 +129,111 @@ function stopLive() {
   S.cam = null;
 }
 
-async function captureBackgroundThenTrack() {
-  $('live-go').disabled = true;
-  $('live-status').textContent = '배경을 잡고 있습니다 — 그대로 두세요…';
-
-  // 살짝 떨어진 프레임 9장의 중앙값. 조명 깜빡임이나 잡음이 상쇄된다.
-  const need = BACKGROUND_SAMPLES;
-  const frames = [];
-  let seen = 0;
-  const grab = streamCameraFrames(S.cam, S.size, (luma) => {
-    if (seen++ % 4 === 0 && frames.length < need) frames.push(new Uint8Array(luma));
-    if (frames.length >= need) grab.stop();
-  });
-  await Promise.race([grab.done, new Promise(r => setTimeout(r, 6000))]);
-  grab.stop();
-
-  if (frames.length < 3) {
-    stopLive();
-    fail('카메라에서 화면을 충분히 읽지 못했습니다. 다시 시도하거나 영상 파일로 해 보세요.');
-    return;
-  }
-  if (frames.length % 2 === 0) frames.pop();
-  S.background = medianBackground(frames, S.size.width, S.size.height);
-
-  // 이제 추적 시작
-  const points = [];
-  let last = null, vx = 0, vy = 0, miss = 0;
+/**
+ * 자동 감지.
+ *
+ * 버튼을 누를 필요가 없다. 배경을 계속 갱신하면서 지켜보다가,
+ * 움직이는 것이 나타나면 그때부터 기록하고 지나가면 알아서 끝낸다.
+ *
+ * 배경을 '지수 이동 평균'으로 계속 갱신하는 이유:
+ *  - 조명이 바뀌거나 폰이 살짝 흔들려도 따라간다
+ *  - 갱신을 아주 천천히 하므로(프레임당 3%) 빠르게 지나가는 구슬은 배경에 배지 않는다
+ */
+function startAutoWatch() {
   const { width: W, height: H } = S.size;
+  const n = W * H;
+  const bgF = new Float32Array(n);      // 실수로 들고 있어야 조금씩 갱신된다
+  const bgU = new Uint8Array(n);
   const detector = new BlobDetector(W, H);
   const threshold = +$('sens').value;
+  const maxArea = Math.round(n * 0.01); // 화면의 1% 넘게 큰 것은 구슬이 아니다 (손·그림자)
 
-  // 아직 기준선을 안 그었으므로 구슬 크기를 모른다. 크기 조건 없이 찾는다.
+  const WARMUP = 25;        // 배경을 익히는 프레임 수
+  const MIN_POINTS = 8;     // 이만큼 모여야 '한 번 굴린 것'으로 인정
+  const LOST_END = 12;      // 이만큼 안 보이면 다 지나갔다고 본다
+
+  let seen = 0;
+  let points = [];
+  let last = null, vx = 0, vy = 0, lost = 0;
+
+  const setStatus = (t) => { $('live-status').textContent = t; };
+
   const track = streamCameraFrames(S.cam, S.size, (luma, t) => {
-    const roi = (last && miss < 3)
-      ? { x0: Math.round(last.x + vx) - 60 - Math.abs(vx), y0: Math.round(last.y + vy) - 60 - Math.abs(vy),
-          x1: Math.round(last.x + vx) + 60 + Math.abs(vx), y1: Math.round(last.y + vy) + 60 + Math.abs(vy) }
+    seen++;
+
+    // ── 배경 갱신 ──
+    if (seen === 1) {
+      for (let i = 0; i < n; i++) bgF[i] = luma[i];
+    } else {
+      // 구슬을 쫓는 중에는 더 천천히 — 구슬이 배경에 배지 않도록
+      const a = points.length ? 0.005 : 0.03;
+      for (let i = 0; i < n; i++) bgF[i] += (luma[i] - bgF[i]) * a;
+    }
+    for (let i = 0; i < n; i++) bgU[i] = bgF[i];
+
+    if (seen < WARMUP) {
+      setStatus(`화면을 익히는 중… ${Math.round((seen / WARMUP) * 100)}%`);
+      return;
+    }
+    if (seen === WARMUP) setStatus('준비됐습니다 — 구슬을 굴리세요.');
+
+    // ── 움직이는 것 찾기 ──
+    const roi = (last && lost < 3)
+      ? { x0: Math.round(last.x + vx) - 70 - Math.abs(vx), y0: Math.round(last.y + vy) - 70 - Math.abs(vy),
+          x1: Math.round(last.x + vx) + 70 + Math.abs(vx), y1: Math.round(last.y + vy) + 70 + Math.abs(vy) }
       : { x0: 0, y0: 0, x1: W - 1, y1: H - 1 };
 
-    // 카메라는 프레임레이트가 낮아 구슬이 길게 번진다 → 번짐 허용
-    const blob = detector.detect(luma, S.background, threshold, roi, null, true);
+    const blob = detector.detect(luma, bgU, threshold, roi, null, true, maxArea);
+
     if (blob) {
       const p = { x: blob.cx, y: blob.cy };
-      if (last && Math.hypot(p.x - last.x, p.y - last.y) < 0.1) { last = p; return; }
-      if (last && miss === 0) {
+      // 제자리에 있는 것은 구슬이 아니다 (그림자·반사)
+      if (last && Math.hypot(p.x - last.x, p.y - last.y) < 0.4) { last = p; lost++; return; }
+      if (last && lost === 0) {
         vx = 0.6 * vx + 0.4 * (p.x - last.x);
         vy = 0.6 * vy + 0.4 * (p.y - last.y);
       } else { vx = 0; vy = 0; }
-      last = p; miss = 0;
-      points.push({ time: t, point: p, area: blob.area });
-      $('live-status').textContent = `구슬 ${points.length}장 잡았습니다 — 다 굴렀으면 [정지]`;
-    } else {
-      miss++;
-      if (miss >= 3) { last = null; vx = 0; vy = 0; }
-    }
-  });
-  S.live = track;
-
-  $('live-status').textContent = '이제 구슬을 굴리세요!';
-  $('live-go').textContent = '정지';
-  $('live-go').disabled = false;
-  $('live-go').onclick = async () => {
-    $('live-go').disabled = true;
-    track.stop();
-    const info = await track.done;
-    stopLive();
-
-    if (points.length < 6) {
-      fail(`구슬을 ${points.length}장밖에 못 찾았습니다. 배경과 구슬의 밝기 차이를 키우거나, 더 밝은 곳에서 해 보세요.`);
+      last = p; lost = 0;
+      points.push({ time: t, point: p, area: blob.area, minorSigma: blob.minorSigma });
+      setStatus(`구슬을 쫓는 중… ${points.length}장`);
       return;
     }
-    // 카메라 시간은 이미 실제 시간이다 (배율 보정 없음)
-    S.livePoints = points;
-    S.liveClock = info.clock;
-    setupCalibration();
-    show('step-cal');
+
+    // ── 놓쳤을 때 ──
+    lost++;
+    if (lost < LOST_END) return;
+    last = null; vx = 0; vy = 0;
+
+    if (points.length >= MIN_POINTS) {
+      const done = points;
+      points = [];
+      S.background = new Uint8Array(bgU);   // 기준선 화면에 쓸 배경
+      track.stop();
+      finishAuto(done);
+    } else if (points.length) {
+      points = [];
+      setStatus('너무 짧게 지나갔습니다 — 다시 굴려 보세요.');
+    }
+  });
+
+  S.live = track;
+  $('live-go').textContent = '지금 멈추기';
+  $('live-go').disabled = false;
+  $('live-go').onclick = () => {
+    const done = points;
+    S.background = new Uint8Array(bgU);
+    track.stop();
+    if (done.length >= 6) finishAuto(done);
+    else { stopLive(); fail(`구슬을 ${done.length}장밖에 못 찾았습니다. 배경과 구슬의 밝기 차이를 키우거나 더 밝은 곳에서 해 보세요.`); }
   };
+}
+
+function finishAuto(points) {
+  stopLive();
+  S.livePoints = points;
+  $('scale-mode').value = 'marble';    // 자동 감지는 자 없이 쓰는 게 자연스럽다
+  setupCalibration();
+  show('step-cal');
 }
 
 // ── 2. 기준선 ───────────────────────────────────────────────
@@ -297,6 +325,8 @@ dragHandle($('handle-a'), S.a);
 dragHandle($('handle-b'), S.b);
 window.addEventListener('resize', () => { if (S.background) placeHandles(); });
 
+const scaleMode = () => $('scale-mode').value;
+const usesRuler = () => scaleMode() === 'ruler';
 const refCM = () => parseFloat($('ref-cm').value) || 0;
 const diameterM = () => (parseFloat($('dia-mm').value) || 16) / 1000;
 function pixelsPerMeter() {
@@ -304,18 +334,41 @@ function pixelsPerMeter() {
   const m = refCM() / 100;
   return px > 1 && m > 0 ? px / m : null;
 }
+
+/** 자 대신 구슬 자신을 잣대로 쓴다. 화면에서 잰 지름(px) ÷ 실제 지름(m) */
+function pixelsPerMeterFromMarble(points) {
+  const dPx = estimateMarbleDiameterPx(points);
+  const dM = diameterM();
+  if (!dPx || !(dM > 0)) return null;
+  return dPx / dM;
+}
 function updateReadout() {
+  const ruler = usesRuler();
   const ppm = pixelsPerMeter();
   const px = Math.hypot(S.b.x - S.a.x, S.b.y - S.a.y);
   const fpsNote = S.containerFps
     ? ` · 영상 ${S.containerFps.toFixed(0)}fps${S.containerFps < S.captureFps - 5 ? ` (촬영 ${S.captureFps}fps 를 늘려 저장한 파일)` : ''}`
     : '';
-  $('cal-readout').textContent = ppm
-    ? `기준선 ${px.toFixed(0)}px = ${refCM()}cm → 1m 당 ${ppm.toFixed(0)}px · 구슬은 화면에서 약 ${(diameterM() * ppm).toFixed(1)}px${fpsNote}`
-    : '기준선을 그어 주세요.';
-  $('cal-go').disabled = !ppm;
-  drawCalOverlay();
+
+  $('cal-wrap').classList.toggle('hidden', !ruler);
+  $('row-ref').classList.toggle('hidden', !ruler);
+  $('scale-help').textContent = ruler
+    ? '길이를 아는 물건이면 무엇이든 됩니다 — 자, A4 종이 긴 변(29.7cm), 신용카드 긴 변(8.6cm), 500원 동전 지름(2.65cm), 젓가락. 구슬이 지나가는 그 자리에 놓인 것이어야 합니다.'
+    : '구슬 자신을 잣대로 씁니다. 화면 속 구슬이 몇 픽셀인지 재어 환산합니다. 자가 없어도 되지만 오차가 5~10% 로 커집니다. 구슬 지름을 정확히 입력하세요.';
+
+  if (ruler) {
+    $('cal-readout').textContent = ppm
+      ? `기준선 ${px.toFixed(0)}px = ${refCM()}cm → 1m 당 ${ppm.toFixed(0)}px · 구슬은 화면에서 약 ${(diameterM() * ppm).toFixed(1)}px${fpsNote}`
+      : '기준선을 그어 주세요.';
+    $('cal-go').disabled = !ppm;
+    drawCalOverlay();
+  } else {
+    $('cal-readout').textContent =
+      `구슬 지름 ${(diameterM() * 1000).toFixed(0)}mm 을 잣대로 씁니다. 분석하면서 화면 속 크기를 재어 환산합니다.${fpsNote}`;
+    $('cal-go').disabled = false;
+  }
 }
+$('scale-mode').onchange = updateReadout;
 $('ref-cm').oninput = updateReadout;
 $('dia-mm').oninput = updateReadout;
 $('sens').oninput = () => {
@@ -334,7 +387,10 @@ $('cal-go').onclick = async () => {
 
     // 카메라 모드는 이미 굴리는 동안 추적을 마쳤다. 바로 적합만 하면 된다.
     if (S.isLive) {
-      S.result = fitTrajectory(S.livePoints, ppm);
+      const scale = usesRuler() ? ppm : pixelsPerMeterFromMarble(S.livePoints);
+      if (!scale) throw new Error('구슬 크기를 재지 못했습니다. 자를 놓고 다시 하거나, 구슬이 더 크게 나오도록 가까이서 찍어 보세요.');
+      S.scaleUsed = scale;
+      S.result = fitTrajectory(S.livePoints, scale);
       S.comparison = compareWithTheory(
         S.result.trajectoryAngleDegrees, $('body').value, S.result.acceleration);
       renderResult();
@@ -350,8 +406,11 @@ $('cal-go').onclick = async () => {
     const { width: W, height: H } = S.size;
     const detector = new BlobDetector(W, H);
     const threshold = +$('sens').value;
-    const radiusPx = Math.max(2, (diameterM() / 2) * ppm);
-    const expectedArea = Math.PI * radiusPx * radiusPx;
+    // 자 없이 환산할 때는 아직 배율을 모르므로 예상 크기를 줄 수 없다.
+    // 크기 조건 없이 찾은 뒤, 잡힌 구슬의 폭으로 배율을 계산한다.
+    const ruler = usesRuler();
+    const radiusPx = ruler ? Math.max(2, (diameterM() / 2) * ppm) : 10;
+    const expectedArea = ruler ? Math.PI * radiusPx * radiusPx : null;
     const searchRadius = Math.round(radiusPx * 6);
 
     const points = [];
@@ -366,7 +425,7 @@ $('cal-go').onclick = async () => {
             y1: Math.round(last.y + vy) + searchRadius + Math.abs(vy) }
         : { x0: 0, y0: 0, x1: W - 1, y1: H - 1 };
 
-      const blob = detector.detect(luma, S.background, threshold, roi, expectedArea);
+      const blob = detector.detect(luma, S.background, threshold, roi, expectedArea, !ruler);
       if (blob) {
         const p = { x: blob.cx, y: blob.cy };
 
@@ -383,7 +442,7 @@ $('cal-go').onclick = async () => {
           vy = 0.6 * vy + 0.4 * (p.y - last.y);
         } else { vx = 0; vy = 0; }
         last = p; miss = 0;
-        points.push({ time: mediaTime, point: p, area: blob.area });
+        points.push({ time: mediaTime, point: p, area: blob.area, minorSigma: blob.minorSigma });
       } else {
         miss++;
         if (miss >= 3) { last = null; vx = 0; vy = 0; }
@@ -391,10 +450,14 @@ $('cal-go').onclick = async () => {
     }, progress, rate);
 
     // 컨테이너 시간 → 실제 시간
-    const scale = timeScale(S.containerFps || S.captureFps, S.captureFps);
-    const real = points.map(p => ({ ...p, time: p.time * scale }));
+    const tScale = timeScale(S.containerFps || S.captureFps, S.captureFps);
+    const real = points.map(p => ({ ...p, time: p.time * tScale }));
 
-    S.result = fitTrajectory(real, ppm);
+    const scale = ruler ? ppm : pixelsPerMeterFromMarble(real);
+    if (!scale) throw new Error('구슬 크기를 재지 못했습니다. 자를 놓고 다시 하거나, 구슬이 더 크게 나오도록 가까이서 찍어 보세요.');
+    S.scaleUsed = scale;
+
+    S.result = fitTrajectory(real, scale);
     S.comparison = compareWithTheory(
       S.result.trajectoryAngleDegrees, $('body').value, S.result.acceleration);
     renderResult();
@@ -493,9 +556,13 @@ function renderResult() {
       ${check(r.fitResidualRMS < 0.004,
         `등가속도 운동에 잘 맞습니다 (오차 ${f(r.fitResidualRMS * 1000, 1)} mm)`,
         `궤적이 매끄럽지 않습니다 (오차 ${f(r.fitResidualRMS * 1000, 1)} mm). 폰이 흔들렸거나 구슬이 튀었을 수 있습니다.`)}
-      ${check(calPx >= 100,
-        '기준선이 충분히 깁니다',
-        `기준선이 짧아(${calPx.toFixed(0)}px) 거리 환산 오차가 커집니다. 더 긴 자를 쓰세요.`)}
+      ${usesRuler()
+        ? check(calPx >= 100,
+            '기준선이 충분히 깁니다',
+            `기준선이 짧아(${calPx.toFixed(0)}px) 거리 환산 오차가 커집니다. 더 긴 물건을 쓰세요.`)
+        : check(false,
+            '',
+            `자 없이 구슬 크기(화면에서 ${f(S.scaleUsed * diameterM(), 1)}px)로 환산했습니다. 거리·속도·가속도 모두 5~10% 오차를 안고 있습니다. 정확한 값이 필요하면 길이를 아는 물건을 같이 찍어 '자·물건으로' 환산하세요.`)}
       <p class="hint" style="margin-top:12px">가장 큰 오차는 시간이 아니라 <b>거리 환산</b>과 <b>카메라 각도</b>에서 옵니다. 자를 구슬이 지나가는 바로 그 자리에 두고, 카메라를 진행 방향과 직각으로 놓는 것이 정확도를 가장 크게 좌우합니다.</p>
     </div>
 

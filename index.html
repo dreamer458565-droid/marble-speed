@@ -40,7 +40,7 @@
 
   <input type="file" id="file" accept="video/*" hidden>
   <button id="pick" class="primary big">슬로모 영상 선택</button>
-  <button id="live" class="big" style="margin-top:8px">카메라로 바로 재기</button>
+  <button id="live" class="big" style="margin-top:8px">카메라로 바로 재기 (겨냥하고 굴리기만)</button>
   <p class="hint">카메라로 바로 재면 파일을 고를 필요가 없습니다. 다만 브라우저는 240fps 를 못 열어 주므로(최대 60fps) 정확도는 슬로모 쪽이 훨씬 높습니다.</p>
 
   <details class="guide">
@@ -68,21 +68,29 @@
 <!-- 2-B. 카메라로 바로 재기 -->
 <section id="step-live" class="card hidden">
   <h2>카메라로 바로 재기</h2>
-  <p class="muted">폰을 고정하고 경사면 옆에서 진행 방향과 <b>직각</b>으로 잡으세요. <b>자를 구슬이 지나갈 자리에 같이</b> 놓아야 합니다.</p>
+  <p class="muted">폰을 고정하고 경사면 옆에서 진행 방향과 <b>직각</b>으로 잡으세요. 잠깐 기다리면 화면을 익힙니다. 그 뒤 <b>그냥 굴리면</b> 알아서 잡고 알아서 끝냅니다.</p>
 
   <div id="live-stage" class="stage"></div>
   <p class="hint" id="live-status">카메라를 켜는 중…</p>
 
   <div class="row">
     <button id="live-cancel">그만두기</button>
-    <button id="live-go" class="primary" disabled>배경 잡기</button>
+    <button id="live-go" class="primary" disabled>지금 멈추기</button>
   </div>
 </section>
 
 <!-- 3. 기준선 -->
 <section id="step-cal" class="card hidden">
-  <h2>기준선 긋기</h2>
-  <p class="muted">자 위로 <b class="tag-a">A</b>·<b class="tag-b">B</b> 점을 옮기고 두 점 사이의 실제 길이를 입력하세요. 구슬은 지워진 배경이 보입니다.</p>
+  <h2>거리 환산</h2>
+
+  <label class="field">
+    <span>어떻게 환산할까요?</span>
+    <select id="scale-mode">
+      <option value="ruler" selected>자·물건으로 (정확)</option>
+      <option value="marble">구슬 크기로 (자 없이)</option>
+    </select>
+  </label>
+  <p class="muted" id="scale-help"></p>
 
   <div id="cal-wrap" class="stage">
     <canvas id="cal-canvas"></canvas>
@@ -90,7 +98,7 @@
     <div id="handle-b" class="handle b"><i></i><em>B</em></div>
   </div>
 
-  <label class="field">
+  <label class="field" id="row-ref">
     <span>A–B 실제 길이</span>
     <span class="io"><input type="number" id="ref-cm" value="30" min="1" step="0.5" inputmode="decimal"> cm</span>
   </label>
